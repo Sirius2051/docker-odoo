@@ -1,7 +1,8 @@
 import logging
+import time
 from datetime import datetime, timezone
 
-from odoo import http
+from odoo import Command, http
 from odoo.http import request
 
 _logger = logging.getLogger(__name__)
@@ -10,7 +11,6 @@ TRUE_VALUES = {"1", "true", "yes"}
 
 
 class ApiError(Exception):
-
     def __init__(self, code, message, field=None, status=422):
         super().__init__(message)
         self.code = code
@@ -20,12 +20,37 @@ class ApiError(Exception):
 
 
 class ShopApiController(http.Controller):
-
     def _error_response(self, status, code, message, field=None):
         error = {"code": code, "message": message}
         if field:
             error["field"] = field
         return request.make_json_response({"error": error}, status=status)
+
+    def _authenticate_bearer(self):
+        header = request.httprequest.headers.get("Authorization", "")
+        scheme, _sep, key = header.partition(" ")
+        if scheme.lower() != "bearer" or not key.strip():
+            return None
+        uid = request.env["res.users.apikeys"]._check_credentials(scope="rpc", key=key.strip())
+        if uid:
+            request.update_env(user=uid)
+        return uid
+
+    def _require_api_user(self):
+        if self._authenticate_bearer():
+            return True
+        return not request.env.user._is_public()
+
+    def _log_call(self, started, response, error_code=None, order=None):
+        request.env["shop.api.log"].sudo().create({
+            "endpoint": request.httprequest.path,
+            "method": request.httprequest.method,
+            "user_id": False if request.env.user._is_public() else request.env.user.id,
+            "status_code": response.status_code,
+            "error_code": error_code,
+            "duration_ms": (time.perf_counter() - started) * 1000,
+            "order_id": order.id if order else False,
+        })
 
     def _parse_datetime(self, value, field):
         try:
@@ -68,11 +93,98 @@ class ShopApiController(http.Controller):
             "category": product.categ_id.complete_name,
         }
 
-    @http.route("/api/v1/products", type="http", auth="user", methods=["GET"])
+    @http.route("/api/v1/products", type="http", auth="public", methods=["GET"])
     def list_products(self, **params):
+        started = time.perf_counter()
+        if not self._require_api_user():
+            response = self._error_response(401, "UNAUTHORIZED", "Falta la clave API o no es válida.")
+            self._log_call(started, response, "UNAUTHORIZED")
+            return response
         try:
             domain = self._products_domain(params)
         except ApiError as error:
-            return self._error_response(error.status, error.code, error.message, error.field)
+            response = self._error_response(error.status, error.code, error.message, error.field)
+            self._log_call(started, response, error.code)
+            return response
         products = request.env["product.product"].search(domain, order="id")
-        return request.make_json_response({"data": [self._serialize_product(p) for p in products]})
+        response = request.make_json_response({"data": [self._serialize_product(p) for p in products]})
+        self._log_call(started, response)
+        return response
+
+    def _find_customer(self, payload):
+        vat = (payload.get("customer_vat") or "").strip()
+        if not vat:
+            raise ApiError("REQUIRED_FIELD", "El RIF del cliente es obligatorio.", field="customer_vat")
+        partner = request.env["res.partner"].search([("vat", "=ilike", vat)], limit=1)
+        if not partner:
+            raise ApiError("CUSTOMER_NOT_FOUND", f"No existe un cliente con RIF {vat}.", field="customer_vat")
+        return partner
+
+    def _prepare_order_lines(self, lines):
+        if not isinstance(lines, list) or not lines:
+            raise ApiError("REQUIRED_FIELD", "El pedido debe tener al menos una línea.", field="lines")
+        codes = [line.get("default_code") for line in lines if isinstance(line, dict)]
+        products = request.env["product.product"].search([("default_code", "in", codes), ("sale_ok", "=", True)])
+        products_by_code = {product.default_code: product for product in products}
+
+        commands = []
+        for index, line in enumerate(lines):
+            if not isinstance(line, dict):
+                raise ApiError("INVALID_LINE", "Cada línea debe ser un objeto.", field=f"lines[{index}]")
+            code = line.get("default_code")
+            product = products_by_code.get(code)
+            if not product:
+                raise ApiError(
+                    "PRODUCT_NOT_FOUND",
+                    f"No existe un producto vendible con código {code!r}.",
+                    field=f"lines[{index}].default_code",
+                )
+            quantity = line.get("quantity")
+            if isinstance(quantity, bool) or not isinstance(quantity, (int, float)) or quantity <= 0:
+                raise ApiError(
+                    "INVALID_QUANTITY", "La cantidad debe ser un número mayor que cero.",
+                    field=f"lines[{index}].quantity",
+                )
+            commands.append(Command.create({"product_id": product.id, "product_uom_qty": quantity}))
+        return commands
+
+    def _create_order(self, payload):
+        if not isinstance(payload, dict):
+            raise ApiError("INVALID_BODY", "El cuerpo debe ser un objeto JSON.", status=400)
+        partner = self._find_customer(payload)
+        order_lines = self._prepare_order_lines(payload.get("lines"))
+        return request.env["sale.order"].create({
+            "partner_id": partner.id,
+            "client_order_ref": payload.get("external_reference"),
+            "order_line": order_lines,
+        })
+
+    @http.route("/api/v1/orders", type="http", auth="public", methods=["POST"], csrf=False)
+    def create_order(self):
+        started = time.perf_counter()
+        if not self._authenticate_bearer():
+            response = self._error_response(401, "UNAUTHORIZED", "Falta la clave API o no es válida.")
+            self._log_call(started, response, "UNAUTHORIZED")
+            return response
+
+        order = None
+        error_code = None
+        try:
+            try:
+                payload = request.get_json_data()
+            except ValueError:
+                raise ApiError("INVALID_JSON", "El cuerpo no es JSON válido.", status=400)
+            with request.env.cr.savepoint():
+                order = self._create_order(payload)
+            response = request.make_json_response(
+                {"data": {"id": order.id, "name": order.name, "state": order.state}}, status=201,
+            )
+        except ApiError as error:
+            error_code = error.code
+            response = self._error_response(error.status, error.code, error.message, error.field)
+        except Exception:
+            _logger.exception("Error inesperado creando un pedido desde la tienda")
+            error_code = "INTERNAL_ERROR"
+            response = self._error_response(500, "INTERNAL_ERROR", "Error interno. Intente de nuevo más tarde.")
+        self._log_call(started, response, error_code, order)
+        return response

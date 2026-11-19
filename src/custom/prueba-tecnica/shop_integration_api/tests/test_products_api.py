@@ -87,7 +87,15 @@ class TestProductsApi(HttpCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(body["error"]["code"], "INVALID_PARAMETER")
 
-    def test_requires_login(self):
+    def test_requires_login_or_api_key(self):
         self.authenticate(None, None)
-        response = self.url_open("/api/v1/products", allow_redirects=False)
-        self.assertIn(response.status_code, (302, 303))
+        response, body = self._get()
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(body["error"]["code"], "UNAUTHORIZED")
+
+    def test_api_key_gives_access_without_session(self):
+        key = self.env["res.users.apikeys"].with_user(self.user)._generate("rpc", "Prueba catálogo")
+        self.authenticate(None, None)
+        response = self.url_open("/api/v1/products", headers={"Authorization": f"Bearer {key}"})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("API-STOCK", self._codes(response.json()))
