@@ -38,6 +38,13 @@ Al ejecutar `-u fleet_inspection`, Odoo hace, en este orden:
 | 4 | 5 000 | — (instantáneo) | Base `dev`, actualización real de 17.0.1.0.0 a 17.0.2.0.0 |
 | 10 000 | 1 000 | **0,116 s** | Prueba `test_migrates_10000_rows_in_batches` |
 
+**Cómo se generaron las 10.000 inspecciones:** dentro de la prueba, con SQL
+(`INSERT INTO fleet_inspection … SELECT … FROM generate_series(1, 10000)`), repartidas por igual
+entre los cuatro valores viejos (`motorcycle`, `car`, `truck`, `other`), sobre el esquema que deja la
+actualización (columna vieja presente y `vehicle_type_id` vacío). Por ORM tardaría minutos por el
+seguimiento del chatter. La conversión trabaja por rangos de id en SQL, sin cargar registros en
+memoria.
+
 A esta escala los lotes no hacen falta. Importan con millones de filas: cada `UPDATE` toca como
 máximo un lote, en lugar de una sola transacción gigante que bloquee la tabla y llene el registro
 de cambios de PostgreSQL.
