@@ -1,6 +1,10 @@
+import hashlib
+import json
 import logging
 import time
 from datetime import datetime, timezone
+
+import psycopg2
 
 from odoo import Command, http
 from odoo.http import request
@@ -8,6 +12,8 @@ from odoo.http import request
 _logger = logging.getLogger(__name__)
 
 TRUE_VALUES = {"1", "true", "yes"}
+DEFAULT_LIMIT = 50
+MAX_LIMIT = 200
 
 
 class ApiError(Exception):
@@ -71,6 +77,19 @@ class ShopApiController(http.Controller):
             raise ApiError("INVALID_PARAMETER", "Debe ser un número entero positivo.", field=field, status=400)
         return int(value)
 
+    def _parse_pagination(self, params):
+        limit = DEFAULT_LIMIT
+        if params.get("limit"):
+            limit = self._parse_positive_int(params["limit"], "limit")
+            if limit > MAX_LIMIT:
+                raise ApiError("INVALID_PARAMETER", f"El máximo es {MAX_LIMIT}.", field="limit", status=400)
+        offset = 0
+        if params.get("offset"):
+            if not params["offset"].isdigit():
+                raise ApiError("INVALID_PARAMETER", "Debe ser un entero mayor o igual que cero.", field="offset", status=400)
+            offset = int(params["offset"])
+        return limit, offset
+
     def _products_domain(self, params):
         domain = [("sale_ok", "=", True)]
         if params.get("category_id"):
@@ -102,12 +121,19 @@ class ShopApiController(http.Controller):
             return response
         try:
             domain = self._products_domain(params)
+            limit, offset = self._parse_pagination(params)
         except ApiError as error:
             response = self._error_response(error.status, error.code, error.message, error.field)
             self._log_call(started, response, error.code)
             return response
-        products = request.env["product.product"].search(domain, order="id")
-        response = request.make_json_response({"data": [self._serialize_product(p) for p in products]})
+        Product = request.env["product.product"]
+        total = Product.search_count(domain)  # C
+        products = Product.search(domain, order="id", limit=limit, offset=offset)
+        next_offset = offset + limit if offset + limit < total else None
+        response = request.make_json_response({
+            "data": [self._serialize_product(p) for p in products],
+            "meta": {"total": total, "limit": limit, "offset": offset, "next_offset": next_offset},
+        })
         self._log_call(started, response)
         return response
 
@@ -157,7 +183,26 @@ class ShopApiController(http.Controller):
             "partner_id": partner.id,
             "client_order_ref": payload.get("external_reference"),
             "order_line": order_lines,
+            "shop_origin": True,
         })
+
+    def _request_hash(self, payload):
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return hashlib.sha256(canonical.encode()).hexdigest()
+
+    def _replay_or_conflict(self, key, payload):
+        Idempotency = request.env["shop.api.idempotency"].sudo()
+        previous = Idempotency.search([("key", "=", key), ("user_id", "=", request.env.uid)], limit=1)
+        if not previous:
+            return None
+        if previous.request_hash != self._request_hash(payload):
+            raise ApiError(
+                "IDEMPOTENCY_CONFLICT",
+                "Esta clave de idempotencia ya se usó con un cuerpo distinto.",
+                field="Idempotency-Key",
+                status=409,
+            )
+        return request.make_json_response(json.loads(previous.response_body), status=previous.response_status)
 
     @http.route("/api/v1/orders", type="http", auth="public", methods=["POST"], csrf=False)
     def create_order(self):
@@ -169,22 +214,46 @@ class ShopApiController(http.Controller):
 
         order = None
         error_code = None
+        idempotency_key = (request.httprequest.headers.get("Idempotency-Key") or "").strip()
         try:
             try:
                 payload = request.get_json_data()
             except ValueError:
                 raise ApiError("INVALID_JSON", "El cuerpo no es JSON válido.", status=400)
-            with request.env.cr.savepoint():
-                order = self._create_order(payload)
-            response = request.make_json_response(
-                {"data": {"id": order.id, "name": order.name, "state": order.state}}, status=201,
-            )
+
+            replay = self._replay_or_conflict(idempotency_key, payload) if idempotency_key else None 
+            if replay is not None:
+                response = replay
+            else:
+                with request.env.cr.savepoint():
+                    order = self._create_order(payload)
+                    body = {"data": {"id": order.id, "name": order.name, "state": order.state}}
+                    if idempotency_key: 
+                        request.env["shop.api.idempotency"].sudo().create({
+                            "key": idempotency_key,
+                            "user_id": request.env.uid,
+                            "request_hash": self._request_hash(payload),
+                            "order_id": order.id,
+                            "response_status": 201,
+                            "response_body": json.dumps(body),
+                        })
+                response = request.make_json_response(body, status=201)
         except ApiError as error:
             error_code = error.code
+            order = None
             response = self._error_response(error.status, error.code, error.message, error.field)
+        except psycopg2.IntegrityError:
+            error_code = "IDEMPOTENCY_IN_PROGRESS"
+            order = None
+            response = self._error_response(
+                409, "IDEMPOTENCY_IN_PROGRESS",
+                "Otra petición con la misma clave de idempotencia se está procesando.",
+                field="Idempotency-Key",
+            )
         except Exception:
             _logger.exception("Error inesperado creando un pedido desde la tienda")
             error_code = "INTERNAL_ERROR"
+            order = None
             response = self._error_response(500, "INTERNAL_ERROR", "Error interno. Intente de nuevo más tarde.")
         self._log_call(started, response, error_code, order)
         return response
