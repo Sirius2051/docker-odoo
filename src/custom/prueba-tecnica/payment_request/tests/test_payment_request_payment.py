@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from odoo.addons.account.tests.common import AccountTestInvoicingCommon
 from odoo.exceptions import AccessError, UserError
 from odoo.tests import new_test_user, tagged
@@ -58,3 +60,42 @@ class TestPaymentRequestPayment(AccountTestInvoicingCommon):
         with self.assertRaises(AccessError):
             request.with_user(self.approver)._action_pay(self.bank_journal, "2026-11-20")
         self.assertFalse(request.payment_id)
+
+    # ------------------------------------------------------------------ tramo C
+    def test_usd_request_paid_from_ves_journal_uses_payment_date_rate(self):
+        usd = self.company.currency_id  # la compañía de la prueba está en USD
+        ves = self.env.ref("base.VES")
+        ves.active = True
+        self.env["res.currency.rate"].create([
+            {"currency_id": ves.id, "company_id": self.company.id, "name": "2026-11-01", "rate": 40.0},
+            {"currency_id": ves.id, "company_id": self.company.id, "name": "2026-11-20", "rate": 45.0},
+        ])
+        ves_journal = self.env["account.journal"].create({
+            "name": "Banco en bolívares", "type": "bank", "code": "BVES",
+            "currency_id": ves.id, "company_id": self.company.id,
+        })
+        request = self._approved_request(amount=100.0, currency_id=usd.id, date="2026-11-01")
+        payment = request.with_user(self.treasurer)._action_pay(ves_journal, "2026-11-20")
+        self.assertEqual(payment.currency_id, ves)
+        self.assertAlmostEqual(payment.amount, 4500.0)  # 100 USD x 45 (tasa del día del pago, no la de 40)
+
+    def test_failed_payment_does_not_mark_paid(self):
+        request = self._approved_request()
+        payment_class = type(self.env["account.payment"])
+        with patch.object(payment_class, "action_post", side_effect=UserError("Fallo simulado del banco")):
+            with self.assertRaises(UserError), self.env.cr.savepoint():
+                request.with_user(self.treasurer)._action_pay(self.bank_journal, "2026-11-20")
+        request.invalidate_recordset()
+        self.assertEqual(request.state, "approved")
+        self.assertFalse(request.payment_id)
+        self.assertEqual(self.env["account.payment"].search_count([("ref", "=", request.name)]), 0)
+
+    def test_other_company_user_sees_nothing(self):
+        request = self._approved_request()
+        company_b = self.company_data_2["company"]
+        user_b = new_test_user(
+            self.env, login="prp_user_b", groups="payment_request.group_payment_request_approver",
+            company_id=company_b.id, company_ids=[(6, 0, company_b.ids)],
+        )
+        self.assertNotIn(request, self.env["payment.request"].with_user(user_b).search([]))
+        self.assertFalse(self.env["payment.approval.level"].with_user(user_b).search([]))
