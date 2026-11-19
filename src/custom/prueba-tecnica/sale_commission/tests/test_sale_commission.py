@@ -109,3 +109,12 @@ class TestSaleCommission(TransactionCase):
         order.order_line.sudo().commission_percent = 1.0
         since = fields.Datetime.add(fields.Datetime.now(), hours=1)
         self.assertFalse(self.env["sale.order.line"]._get_commission_mismatches(since))
+    def test_recompute_uses_same_rule_as_confirm(self):
+        self.category.commission_percent = 8.0
+        child = self.env["product.category"].create({"name": "Frenos", "parent_id": self.category.id})
+        self.product.categ_id = child
+        order = self._create_order(self.salesman)
+        order.action_confirm()
+        self.assertEqual(order.order_line.commission_percent, 8.0)  
+        order.action_recompute_commissions()
+        self.assertEqual(order.order_line.commission_percent, 8.0)
