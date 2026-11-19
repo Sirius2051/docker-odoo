@@ -1,4 +1,4 @@
-rom odoo import models
+from odoo import models
 
 
 class SaleOrder(models.Model):
