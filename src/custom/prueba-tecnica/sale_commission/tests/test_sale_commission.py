@@ -1,6 +1,6 @@
+from odoo.exceptions import AccessError
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase, new_test_user
-
 
 @tagged("post_install", "-at_install")
 class TestSaleCommission(TransactionCase):
@@ -12,12 +12,16 @@ class TestSaleCommission(TransactionCase):
             name="Vendedor de prueba",
         )
         cls.salesman.commission_percent = 5.0
-        cls.env.user.commission_percent = 5.0
         cls.other_salesman = new_test_user(
             cls.env, login="commission_other_salesman", groups="sales_team.group_sale_salesman",
             name="Otro vendedor",
         )
         cls.other_salesman.commission_percent = 3.0
+        cls.manager = new_test_user(
+            cls.env, login="commission_manager", groups="sales_team.group_sale_manager",
+            name="Gerente de prueba",
+        )
+        cls.manager.commission_percent = 1.0
         cls.partner = cls.env["res.partner"].create({"name": "Cliente de prueba"})
         cls.category = cls.env["product.category"].create({"name": "Repuestos"})
         cls.product = cls.env["product.product"].create({
@@ -28,7 +32,7 @@ class TestSaleCommission(TransactionCase):
         })
 
     def _create_order(self, user, qty=2):
-        return self.env["sale.order"].create({
+        return self.env["sale.order"].with_user(user).create({
             "partner_id": self.partner.id,
             "user_id": user.id,
             "order_line": [(0, 0, {"product_id": self.product.id, "product_uom_qty": qty})],
@@ -64,3 +68,26 @@ class TestSaleCommission(TransactionCase):
         order = self._create_order(self.salesman)
         order.action_confirm()
         self.assertEqual(order.order_line.commission_percent, 10.0)
+
+    def test_t200_salesman_can_confirm_own_order(self):
+        order = self._create_order(self.salesman)
+        order.action_confirm()
+        self.assertEqual(order.state, "sale")
+        self.assertEqual(order.order_line.commission_percent, 5.0)
+
+    def test_t200_manager_can_still_confirm(self):
+        order = self._create_order(self.manager)
+        order.action_confirm()
+        self.assertEqual(order.state, "sale")
+        self.assertEqual(order.order_line.commission_percent, 1.0)
+
+    def test_t200_manager_confirming_keeps_salesman_percent(self):
+        order = self._create_order(self.salesman)
+        order.with_user(self.manager).action_confirm()
+        self.assertEqual(order.order_line.commission_percent, 5.0)
+
+    def test_t200_salesman_cannot_edit_rules(self):
+        self.category.commission_percent = 8.0
+        rule = self.category.commission_rule_ids
+        with self.assertRaises(AccessError):
+            rule.with_user(self.salesman).write({"percent": 50.0})
