@@ -20,6 +20,16 @@
      al hacer fork, copia por defecto solo la rama principal. Traje `master-multi-prueba-tecnica`
      desde el repositorio original.
 4. Con la ruta dando 404, le pedí revisar el log del contenedor.
+5. Le pedí autenticación con claves API sin `sudo()` y un registro de llamadas que nunca guarde la clave.
+   - Propuso `res.users.apikeys._check_credentials` + `request.update_env`, y una prueba que revisa
+     todos los campos del registro buscando la clave. En la prueba manual confirmé que el pedido
+     lo crea el usuario técnico y que la clave no aparece en el registro.
+6. Le pedí idempotencia segura ante dos peticiones simultáneas.
+   - Propuso la restricción `unique(key, user_id)` dentro del mismo `savepoint` que el pedido, para
+     que la protección la dé la base de datos y no un `if` en Python.
+7. Le pedí un webhook que no bloquee la validación de la entrega.
+   - Propuso una cola con cron y reintentos con espera creciente, y probar con `requests.post`
+     simulado (`patch`), sin salir a internet.
 
 ## Lo que la IA hizo mal
 
@@ -40,6 +50,7 @@
   transcribirlo archivo por archivo, entender cada decisión (por qué `type="http"`, por qué
   variantes, por qué 400 y no 500) y verificarlo.
 - Montar el entorno desde cero (fork, `instances.json`, build, base de datos) y resolver sus errores.
-- Diagnosticar el 404 de la ruta y comprobar el resultado de las pruebas (8 pruebas, 98 % de cobertura).
-- La prueba manual del endpoint en el navegador.
+- Diagnosticar el 404 de la ruta y comprobar el resultado de las pruebas en cada tramo
+  (A: 8; B: 17; C: 27 pruebas, 93 % de cobertura).
+- La prueba manual del catálogo en el navegador.
 - Los commits y la organización en ramas.

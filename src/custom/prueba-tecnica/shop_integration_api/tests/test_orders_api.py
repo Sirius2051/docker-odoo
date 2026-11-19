@@ -91,3 +91,27 @@ class TestOrdersApi(HttpCase):
         for log in logs:
             for value in log.read()[0].values():
                 self.assertNotIn(self.api_key, str(value))
+    def test_idempotency_same_body_returns_same_order(self):
+        headers = {"Idempotency-Key": "pedido-web-1001"}
+        first, body1 = self._post(self._payload(), self.api_key, extra_headers=headers)
+        second, body2 = self._post(self._payload(), self.api_key, extra_headers=headers)
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 201)
+        self.assertEqual(body1["data"]["id"], body2["data"]["id"])
+        self.assertEqual(self.env["sale.order"].search_count([("client_order_ref", "=", "WEB-1001")]), 1)
+
+    def test_idempotency_different_body_returns_409(self):
+        headers = {"Idempotency-Key": "pedido-web-1002"}
+        self._post(self._payload(), self.api_key, extra_headers=headers)
+        other = self._payload(lines=[{"default_code": "API-001", "quantity": 5}])
+        response, body = self._post(other, self.api_key, extra_headers=headers)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(body["error"]["code"], "IDEMPOTENCY_CONFLICT")
+
+    def test_idempotency_key_order_of_fields_does_not_matter(self):
+        headers = {"Idempotency-Key": "pedido-web-1003"}
+        payload = self._payload()
+        reordered = dict(reversed(list(payload.items())))
+        _r1, body1 = self._post(payload, self.api_key, extra_headers=headers)
+        _r2, body2 = self._post(reordered, self.api_key, extra_headers=headers)
+        self.assertEqual(body1["data"]["id"], body2["data"]["id"])
