@@ -99,3 +99,17 @@ class TestProductsApi(HttpCase):
         response = self.url_open("/api/v1/products", headers={"Authorization": f"Bearer {key}"})
         self.assertEqual(response.status_code, 200)
         self.assertIn("API-STOCK", self._codes(response.json()))
+    
+    def test_pagination_metadata(self):
+        query = f"?category_id={self.category.id}&limit=1"
+        _response, first = self._get(query)
+        self.assertEqual(len(first["data"]), 1)
+        self.assertEqual(first["meta"], {"total": 2, "limit": 1, "offset": 0, "next_offset": 1})
+        _response, second = self._get(query + "&offset=1")
+        self.assertEqual(second["meta"]["next_offset"], None)
+        self.assertNotEqual(first["data"][0]["id"], second["data"][0]["id"])
+    
+    def test_limit_above_max_returns_400(self):
+        response, body = self._get("?limit=1000")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(body["error"]["field"], "limit")
