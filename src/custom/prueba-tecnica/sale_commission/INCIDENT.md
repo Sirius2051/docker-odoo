@@ -6,7 +6,8 @@
 | Severidad | Crítica: ningún vendedor puede vender; mañana sábado es el día de más ventas |
 | Inicio | Viernes 12:00, despliegue de la versión 1.1.0 (commit `3f4d73f`) |
 | Detección | Viernes 17:40, ticket del cliente |
-| Corrección | Versión 1.1.1, rama `hotfix/T-200`, PR: <enlace> |
+| Corrección | Versión 1.1.1, rama `hotfix/T-200`, PR [#1](https://github.com/Sirius2051/docker-odoo/pull/1) (fusionado) |
+| Datos y prevención | Rama `fix/T-200-datos` (tramo C) |
 
 ## Cómo se reproduce
 
@@ -163,3 +164,87 @@ pruebas dejaron de probar el caso real: un vendedor confirmando su pedido.
 >Causa: La actualización del mediodía no habilitó el acceso de los vendedores a la nueva configuración de comisiones.
 >Solución: Ya aplicamos la corrección y validamos que pueden confirmar pedidos sin problema, por lo que mañana podrán operar con normalidad.
 >Próximos pasos: Estamos revisando los pedidos que confirmó el gerente esta tarde, ya que podrían tener la comisión mal calculada. El lunes les enviamos el detalle.
+
+## Impacto en los datos (tramo C)
+
+**Qué quedó mal:** entre el despliegue (12:00) y la corrección, los pedidos que confirmó el
+gerente en nombre de los vendedores se guardaron, en las líneas sin regla de categoría, con **el
+porcentaje del gerente** en lugar del del vendedor. El reporte asigna la comisión al vendedor
+correcto (usa el vendedor del pedido), pero con un monto incorrecto.
+
+**Cómo se detecta:** `sale.order.line._get_commission_mismatches(desde)` lista las líneas de
+pedidos confirmados desde una fecha (UTC) cuyo porcentaje guardado no coincide con el que
+corresponde hoy al vendedor del pedido. Tiene dos pruebas: lista solo las líneas incorrectas, e
+ignora los pedidos anteriores a la fecha.
+
+El script `scripts/t200_affected_lines.py` lo llama, escribe un CSV por la salida estándar y
+**deshace la transacción** (`env.cr.rollback()`): no modifica nada.
+
+```bash
+docker exec -i <contenedor_odoo> odoo shell -c /home/odoo/.config/odoo.conf -d <base> --no-http \
+    < src/custom/prueba-tecnica/sale_commission/scripts/t200_affected_lines.py > t200_afectadas.csv
+```
+
+`CONFIRMED_SINCE` va en UTC: las 12:00 de Venezuela son las 16:00 UTC.
+
+**Ejemplo real** (base de prueba `dev`): un pedido del vendedor `vendedor_t200` (5 %), confirmado
+por el administrador, con la línea guardada al 1 % para simular lo que dejó el error:
+
+```text
+pedido,fecha_confirmacion,vendedor,confirmado_por,linea_id,producto,porcentaje_guardado,porcentaje_correcto,comision_guardada,comision_correcta,diferencia
+S00027,2026-11-19 20:34:59,vendedor_t200,__system__,53,[API-001] Producto API prueba,1.0,5.0,0.2,1.0,0.8
+# Líneas afectadas: 1 · diferencia total de comisiones: 0.80
+```
+
+Sin ese caso fabricado, el mismo script sobre `dev` daba 0 líneas afectadas.
+
+**Columna `confirmado_por`:** usa `write_uid`, el último usuario que modificó el pedido. Es una
+pista, no una prueba: alguien pudo editarlo después. El dato exacto de quién confirmó está en el
+historial del pedido (el seguimiento del campo de estado).
+
+**Limitación:** se compara con las reglas vigentes al ejecutar el script. Si una regla de
+categoría cambió después del incidente, una línea correcta en su momento aparecería como
+afectada; por eso el paso 2 del plan es revisar el listado.
+
+## Plan de corrección
+
+1. Ejecutar el script en producción con la hora real del despliegue y guardar el CSV.
+2. Revisar el CSV con el cliente (administración): confirmar las líneas y preguntar si alguna
+   comisión ya se pagó (esas requieren un ajuste en la nómina, no solo en Odoo).
+3. Respaldo de la base de datos.
+4. Corregir **solo** las líneas confirmadas del CSV, en una transacción, desde `odoo shell`:
+   `env["sale.order.line"].browse(<ids>)` y, para cada una,
+   `line.commission_percent = line._get_commission_percent()`; después `env.cr.commit()`.
+   **No** usar el botón *Recalcular comisiones* pedido por pedido: toca todas las líneas.
+5. Volver a ejecutar el script: debe dar 0 líneas afectadas.
+6. Comparar el total del reporte *Comisiones* por vendedor antes y después, y enviar el resumen
+   al cliente.
+
+## El mismo patrón en otra parte del módulo
+
+- **`action_recompute_commissions`** repetía la lógica de cálculo con otra regla: buscaba la
+  categoría **exacta**, sin categorías padre y sin compañía. Un producto de *Repuestos / Frenos*
+  recibía un porcentaje al confirmar y otro al recalcular. **Corregido** reutilizando
+  `_get_commission_percent()`, con una prueba que falla antes (`44d700c`) y pasa después
+  (`6fda0ae`).
+- **El botón *Recalcular comisiones*** no tiene restricción de grupo: cualquier vendedor puede
+  recalcular un pedido confirmado. **Pregunta al cliente:** ¿debería ser solo del gerente? No se
+  cambió porque altera el comportamiento para el cliente.
+
+## Prevención
+
+1. **Regla de revisión:** un PR que modifica una prueba existente para que pase (quitar
+   `with_user`, ajustar datos) explica por qué en la descripción. Fue la señal de este incidente.
+2. **Las pruebas de flujos de usuario corren con el usuario del rol** (`with_user(vendedor)`).
+   Correr como administrador prueba la lógica, no los permisos.
+3. **Modelo nuevo, revisión de permisos:** por cada modelo nuevo, preguntar "¿qué grupos lo
+   **leen** en el flujo normal?", no solo "¿quién lo administra?".
+4. **Datos de prueba que distingan:** cada usuario de prueba con un valor distinto (5 % y 1 %),
+   para que confundir uno con otro haga fallar algo.
+5. **Una sola implementación de cada regla de negocio:** si dos métodos calculan lo mismo, uno
+   llama al otro (fue el problema del recálculo).
+6. **Correr las pruebas después de cada commit** (por ejemplo, en un *pre-commit* o en CI): en
+   este mismo trabajo, un error de transcripción (`rom` en lugar de `from`) llegó a un commit y
+   se detectó después, al ejecutar el script; se corrigió en `479c809`.
+7. **Ensayo en *staging* con un usuario de cada rol** antes de desplegar en producción, y no
+   desplegar un viernes al mediodía sin ese ensayo.

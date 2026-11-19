@@ -1,3 +1,4 @@
+from odoo import fields
 from odoo.exceptions import AccessError
 from odoo.tests import tagged
 from odoo.tests.common import TransactionCase, new_test_user
@@ -91,3 +92,29 @@ class TestSaleCommission(TransactionCase):
         rule = self.category.commission_rule_ids
         with self.assertRaises(AccessError):
             rule.with_user(self.salesman).write({"percent": 50.0})
+
+    def test_t200_mismatches_lists_only_wrong_lines(self):
+        right = self._create_order(self.salesman)
+        right.action_confirm()
+        wrong = self._create_order(self.other_salesman)
+        wrong.action_confirm()
+        wrong.order_line.sudo().commission_percent = 1.0
+        since = fields.Datetime.subtract(fields.Datetime.now(), hours=1)
+        mismatches = self.env["sale.order.line"]._get_commission_mismatches(since)
+        self.assertEqual(mismatches, wrong.order_line)
+
+    def test_t200_mismatches_ignores_older_orders(self):
+        order = self._create_order(self.other_salesman)
+        order.action_confirm()
+        order.order_line.sudo().commission_percent = 1.0
+        since = fields.Datetime.add(fields.Datetime.now(), hours=1)
+        self.assertFalse(self.env["sale.order.line"]._get_commission_mismatches(since))
+    def test_recompute_uses_same_rule_as_confirm(self):
+        self.category.commission_percent = 8.0
+        child = self.env["product.category"].create({"name": "Frenos", "parent_id": self.category.id})
+        self.product.categ_id = child
+        order = self._create_order(self.salesman)
+        order.action_confirm()
+        self.assertEqual(order.order_line.commission_percent, 8.0)  
+        order.action_recompute_commissions()
+        self.assertEqual(order.order_line.commission_percent, 8.0)

@@ -1,4 +1,5 @@
 from odoo import api, fields, models
+from odoo.tools import float_compare
 
 
 class SaleOrderLine(models.Model):
@@ -32,3 +33,16 @@ class SaleOrderLine(models.Model):
         if rules:
             return rules.sorted(lambda r: len(r.categ_id.parent_path or ""), reverse=True)[0].percent
         return self.order_id.user_id.commission_percent
+
+    @api.model
+    def _get_commission_mismatches(self, confirmed_since):
+        lines = self.search([
+            ("order_id.state", "=", "sale"),
+            ("order_id.date_order", ">=", confirmed_since),
+            ("display_type", "=", False),
+        ], order="order_id, id")
+        return lines.filtered(
+            lambda line: float_compare(
+                line.commission_percent, line._get_commission_percent(), precision_digits=2,
+            )
+        )
