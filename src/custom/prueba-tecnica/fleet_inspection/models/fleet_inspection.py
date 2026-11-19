@@ -1,21 +1,21 @@
+import logging
 from datetime import timedelta
-
 from odoo import Command, _, api, fields, models
 from odoo.exceptions import UserError, ValidationError
+from odoo.tools import sql
 
-VEHICLE_TYPES = [
-    ("motorcycle", "Moto"),
-    ("car", "Carro"),
-    ("truck", "Camión"),
-    ("other", "Otro"),
-]
+_logger = logging.getLogger(__name__)
 
+LEGACY_VEHICLE_TYPE_COLUMN = "vehicle_type"
 
 class FleetInspection(models.Model):
     _name = "fleet.inspection"
     _description = "Inspección de vehículo"
     _inherit = ["mail.thread", "mail.activity.mixin"]
     _order = "date desc, id desc"
+
+    def _default_vehicle_type(self):
+        return self.env.ref("fleet_inspection.vehicle_type_car", raise_if_not_found=False)
 
     name = fields.Char(string="Número", required=True, copy=False, readonly=True, default="/")
     vehicle_id = fields.Many2one(
@@ -24,11 +24,12 @@ class FleetInspection(models.Model):
         required=True,
         tracking=True,
     )
-    vehicle_type = fields.Selection(
-        VEHICLE_TYPES,
+    vehicle_type_id = fields.Many2one(
+        "fleet.inspection.vehicle.type",
         string="Tipo de vehículo",
         required=True,
-        default="car",
+        ondelete="restrict",
+        default=_default_vehicle_type,
         tracking=True,
     )
     inspector_id = fields.Many2one(
@@ -140,3 +141,40 @@ class FleetInspection(models.Model):
                 summary=_("Inspección en curso desde hace más de %s días", days),
             )
         return True
+
+    @api.model
+    def _migrate_legacy_vehicle_type(self, batch_size=5000):
+        cr = self.env.cr
+        if not sql.column_exists(cr, self._table, LEGACY_VEHICLE_TYPE_COLUMN):
+            return 0
+
+        cr.execute(f"SELECT COALESCE(MIN(id), 0), COALESCE(MAX(id), 0) FROM {self._table}")
+        min_id, max_id = cr.fetchone()
+        converted = 0
+        for start in range(min_id, max_id + 1, batch_size):
+            end = start + batch_size - 1
+            cr.execute(
+                f"""
+                UPDATE {self._table} AS inspection
+                   SET vehicle_type_id = vehicle_type.id
+                  FROM fleet_inspection_vehicle_type AS vehicle_type
+                 WHERE inspection.id BETWEEN %s AND %s
+                   AND inspection.vehicle_type_id IS NULL
+                   AND vehicle_type.code = inspection.{LEGACY_VEHICLE_TYPE_COLUMN}
+                """,
+                [start, end],
+            )
+            converted += cr.rowcount
+
+        other = self.env.ref("fleet_inspection.vehicle_type_other")
+        cr.execute(
+            f"UPDATE {self._table} SET vehicle_type_id = %s WHERE vehicle_type_id IS NULL",
+            [other.id],
+        )
+        if cr.rowcount:
+            _logger.warning(
+                "fleet_inspection: %s inspecciones sin tipo reconocible quedaron como 'Otro'", cr.rowcount,
+            )
+        converted += cr.rowcount
+        self.invalidate_model(["vehicle_type_id"])
+        return converted
