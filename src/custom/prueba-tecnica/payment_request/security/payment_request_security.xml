@@ -48,4 +48,10 @@
         <field name="global" eval="True"/>
         <field name="domain_force">[('company_id', 'in', company_ids)]</field>
     </record>
+    <record id="payment_approval_level_rule_company" model="ir.rule">
+        <field name="name">Niveles de aprobación: multi-compañía</field>
+        <field name="model_id" ref="model_payment_approval_level"/>
+        <field name="global" eval="True"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+    </record>
 </odoo>
