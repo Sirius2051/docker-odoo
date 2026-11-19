@@ -1,23 +1,28 @@
 # Inspecciones de vehículos (`fleet_inspection`)
 
-Migrado de **Odoo 16** a **Odoo 17.0** (ejercicio 2 de la prueba técnica).
+Migrado de **Odoo 16** a **Odoo 17.0**, con el tipo de vehículo convertido de selección a
+catálogo (ejercicio 2 de la prueba técnica). Versión del módulo: **17.0.2.0.0**.
 
 ## Qué hace
 
 - Registra inspecciones de los vehículos de Flotilla con un checklist de puntos (frenos, luces,
   cauchos…) que se carga solo al crear la inspección.
 - Estados: borrador → en curso → aprobada / rechazada. Un punto crítico con falla impide aprobar.
-- Tipo de vehículo: moto, carro, camión u otro.
+- Tipo de vehículo desde un catálogo configurable (*Flotilla → Configuración → Tipos de vehículo
+  (inspecciones)*): moto, carro, camión y otro vienen de serie.
 - Grupos: *Inspector* (ve solo sus inspecciones) y *Supervisor de inspecciones* (ve todas,
-  aprueba y rechaza).
+  aprueba, rechaza y administra el catálogo).
 - Acción planificada diaria que marca las inspecciones con más de 7 días en curso y le crea una
   actividad al inspector.
 - Reporte PDF de la inspección.
 
 ## Tramos completados
 
-- **A:** migración a 17.0.
-- B y C no realizados en esta entrega (el diseño propuesto está al final).
+- **A:** migración del código a 17.0.
+- **B:** tipo de vehículo como catálogo (`fleet.inspection.vehicle.type`), con script de migración
+  de datos y pruebas de su lógica.
+- **C:** migración idempotente, 10 000 registros por lotes con el tiempo medido y
+  [plan de migración](MIGRATION_PLAN.md).
 
 ## Cómo probarlo
 
@@ -25,7 +30,12 @@ Migrado de **Odoo 16** a **Odoo 17.0** (ejercicio 2 de la prueba técnica).
 ./odoo test prueba-tecnica -d prueba_limpia -m fleet_inspection
 ```
 
-Resultado: **10 pruebas, 0 fallos, 0 errores**; cobertura **93 %**.
+Resultado: **17 pruebas, 0 fallos, 0 errores**; cobertura **95 %**.
+
+| Archivo | Pruebas | Qué demuestra |
+|---|---|---|
+| `test_fleet_inspection.py` | 10 | El comportamiento de siempre sigue igual en 17: secuencia y checklist al crear, creación en lote, la placa en el nombre, el flujo de estados, un punto crítico bloquea la aprobación, kilometraje no negativo, el inspector solo ve y no borra lo suyo, valor por defecto en el formulario, el cron no repite la actividad |
+| `test_vehicle_type_migration.py` | 7 | Cada valor viejo va a su tipo; valores desconocidos o vacíos van a "Otro"; la migración es idempotente; los lotes pequeños no se saltan filas; sin columna vieja no hace nada; el tipo es obligatorio; **10 000 filas por lotes de 1 000** |
 
 ### Punto de partida (antes de migrar)
 
@@ -46,17 +56,25 @@ primer commit de la migración lo mueve con `git mv`, para conservar el historia
 # (sin salida)
 ```
 
-### Prueba manual (base `dev`)
+### Migración real de datos (base `dev`)
 
-Instalado junto con Flotilla en una base con datos de demostración: una inspección nueva toma el
-número `INS/AAAA/NNNN`, carga el checklist, muestra la placa en su nombre y, al iniciarla, el
-vehículo, el tipo y la fecha quedan de solo lectura.
+Base con el módulo en **17.0.1.0.0** y cuatro inspecciones, una de cada tipo, actualizada a
+**17.0.2.0.0** con `./odoo update prueba-tecnica -d dev -m fleet_inspection -f`:
+
+| Tipo | Antes (`vehicle_type`) | Después (`vehicle_type_id.code`) |
+|---|---|---|
+| Moto | 1 | 1 |
+| Carro | 1 | 1 |
+| Camión | 1 | 1 |
+| Otro | 1 | 1 |
+
+Inspecciones sin tipo después de migrar: **0**.
 
 ## Cambios de versión (16.0 → 17.0)
 
 | Qué cambió | Por qué | Cómo |
 |---|---|---|
-| Versión del manifiesto | Odoo 17 solo carga módulos `17.0.x.y.z` (error de arriba) | `16.0.1.0.0` → `17.0.1.0.0` |
+| Versión del manifiesto | Odoo 17 solo carga módulos `17.0.x.y.z` (error de arriba) | `16.0.1.0.0` → `17.0.1.0.0` (y `17.0.2.0.0` con el tramo B) |
 | `states=` en los campos `vehicle_id` y `vehicle_type` | Desde 17 la propiedad `states` de un campo ya no se soporta | Se quitó de Python; `readonly="state != 'draft'"` en la vista |
 | `attrs="{...}"` en las vistas | 17 usa expresiones Python directas; `attrs` y `states` dan error de validación | `invisible="not is_overdue"`, `readonly="state in ('approved', 'rejected')"`, `required="state == 'in_progress'"` |
 | `states="..."` en los botones | Igual que el anterior | `invisible="state != 'draft'"`, etc. |
@@ -72,24 +90,50 @@ vehículo, el tipo y la fecha quedan de solo lectura.
 | (sin cambio) `numbercall` / `doall` en el cron | Siguen existiendo en 17 (se eliminan en 18) | — |
 | (sin cambio) `<tree>` | En 17 sigue siendo `<tree>` (en 18 es `<list>`) | — |
 
+## Tramo B: el tipo de vehículo como catálogo
+
+- **Modelo** `fleet.inspection.vehicle.type` (nombre, código, secuencia, activo). Los cuatro tipos
+  vienen en `data/fleet_inspection_vehicle_type_data.xml` con `noupdate="1"` (si el cliente
+  renombra uno, una actualización futura no se lo pisa). `code` es único y coincide con el valor
+  de la antigua selección (`motorcycle`, `car`, `truck`, `other`).
+- **Campo** `vehicle_type_id`: obligatorio (ninguna inspección sin tipo; prueba
+  `test_type_is_required`) y `ondelete="restrict"` (un tipo en uso no se borra: se archiva).
+- **Valor por defecto** "Carro", como antes, protegido con `raise_if_not_found=False`. Al
+  actualizar, Odoo llena las columnas nuevas con el valor por defecto **antes** de cargar los
+  datos XML; sin esa protección, todas las inspecciones viejas quedarían como "Carro" antes de que
+  corra el script, sin un solo error.
+- **Script** `migrations/17.0.2.0.0/post-migrate.py`: llama a
+  `fleet.inspection._migrate_legacy_vehicle_type()`, que convierte con `UPDATE … FROM` sobre el
+  catálogo, por lotes de id. "Otro" se conserva (su código es `other`); los valores desconocidos o
+  vacíos también van a "Otro", y se cuentan en el log.
+- **La lógica está en un método del modelo** (no en el script) para poder probarla: los scripts de
+  `migrations/` no se pueden importar desde una prueba. Las pruebas recrean con SQL el esquema que
+  deja una actualización desde 17.0.1 (la columna vieja y `vehicle_type_id` todavía vacío).
+- **SQL directo en la conversión**, no ORM: el ORM dispararía el seguimiento en el chatter de cada
+  inspección y recalcularía campos. En el resto del módulo, ORM.
+
+## Tramo C: idempotencia, volumen y plan
+
+- **Idempotente:** solo toca filas con `vehicle_type_id IS NULL` (la segunda ejecución convierte 0:
+  `test_is_idempotent`); si la columna vieja no existe, no hace nada; el catálogo es `noupdate` con
+  código único.
+- **10 000 registros por lotes de 1 000: 0,116 s** (prueba `test_migrates_10000_rows_in_batches`;
+  el tiempo queda en el log de la prueba, así cualquiera lo reproduce). A esta escala los lotes no
+  hacen falta; importan con millones de filas, para no tener una sola transacción gigante que
+  bloquee la tabla.
+- Pasos para producción, validación y reversión: [MIGRATION_PLAN.md](MIGRATION_PLAN.md).
+
 ## Supuestos y limitaciones
 
-- `readonly` en la vista no impide un `write()` por código o RPC (tampoco lo hacía `states=`). Si
-  el negocio exige que el vehículo no cambie después de iniciar la inspección, se agrega una
-  validación en `write`.
+- Los valores desconocidos o vacíos de la antigua selección se convierten a "Otro" (y se
+  registran en el log), en vez de detener la actualización.
+- **Odoo borra la columna vieja `vehicle_type` al terminar la actualización** (`_drop_column`):
+  revertir requiere el respaldo. Si el cliente quiere conservar el dato original, un
+  `pre-migrate.py` puede renombrar la columna antes.
+- `readonly` en la vista no impide un `write()` por código o RPC (tampoco lo hacía `states=`).
 - La migración de los módulos estándar de Odoo 16 → 17 (base, fleet, mail) está fuera de alcance:
   se hace con el servicio de actualización de Odoo u OpenUpgrade.
+- Después de actualizar el módulo con un proceso aparte (`./odoo update`), el servidor que atiende
+  el navegador puede seguir con la versión anterior: hay que reiniciarlo (`./odoo restart`).
 - Al instalar, Odoo muestra avisos de `docutils`: interpreta este README en Markdown como
   reStructuredText para la descripción del módulo. No afecta al funcionamiento.
-
-## Tramos B y C (no realizados): diseño propuesto
-
-- **B:** catálogo `fleet.inspection.vehicle.type` con un campo `code` igual al valor de la antigua
-  selección; campo `vehicle_type_id` obligatorio con valor por defecto protegido
-  (`raise_if_not_found=False`: al actualizar, Odoo llena las columnas nuevas con el valor por
-  defecto **antes** de cargar los datos, y sin esa protección todas las inspecciones viejas
-  quedarían como "Carro" antes del script); script `migrations/17.0.2.0.0/post-migrate.py` que llama
-  a un método del modelo (probado) con `UPDATE … FROM` por lotes de id y `WHERE vehicle_type_id IS NULL`.
-  La columna vieja se conserva para poder revertir.
-- **C:** idempotencia por `IS NULL`, comprobación de que la columna vieja existe y datos
-  `noupdate`; prueba con 10 000 filas por lotes con el tiempo medido; `MIGRATION_PLAN.md`.
