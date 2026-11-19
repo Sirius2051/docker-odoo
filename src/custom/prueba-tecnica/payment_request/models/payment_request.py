@@ -1,3 +1,5 @@
+import psycopg2
+
 from odoo import _, api, fields, models
 from odoo.exceptions import AccessError, UserError, ValidationError
 
@@ -119,6 +121,27 @@ class PaymentRequest(models.Model):
             ("min_amount", "<=", self._amount_in_company_currency()),
         ], order="min_amount desc", limit=1)
 
+    def _lock_for_update(self):
+        """Bloquea las filas de estas solicitudes hasta el final de la transacción.
+
+        Dos aprobadores (o dos tesoreros) al mismo tiempo: el primero toma el bloqueo; el segundo
+        falla de inmediato (NOWAIT) en lugar de leer un estado viejo y aprobar también. La
+        protección la da PostgreSQL, no un if en Python: dos transacciones simultáneas leerían
+        las dos "enviada" y las dos pasarían el if. Mismo patrón que usa el módulo account.
+        """
+        if not self:
+            return
+        try:
+            with self.env.cr.savepoint(flush=False):
+                self.env.cr.execute(
+                    "SELECT id FROM payment_request WHERE id IN %s FOR UPDATE NOWAIT",
+                    [tuple(self.ids)],
+                )
+        except psycopg2.errors.LockNotAvailable:
+            raise UserError(_("Otro usuario está procesando esta solicitud. Intenta de nuevo en unos segundos."))
+        # Releer el estado DESPUÉS de tener el bloqueo: lo que había en caché pudo cambiar.
+        self.invalidate_recordset(["state", "payment_id", "approver_id"])
+
     # ------------------------------------------------------------ actions
     def action_submit(self):
         self._check_state("draft")
@@ -136,6 +159,7 @@ class PaymentRequest(models.Model):
             )
 
     def action_approve(self):
+        self._lock_for_update()
         self._check_is_assigned_approver()
         self._check_state("submitted")
         for request in self:
@@ -163,6 +187,7 @@ class PaymentRequest(models.Model):
         }
 
     def _action_reject(self, reason):
+        self._lock_for_update()
         self._check_is_assigned_approver()
         self._check_state("submitted")
         self.write({"state": "rejected", "rejection_reason": reason})
@@ -188,23 +213,43 @@ class PaymentRequest(models.Model):
         }
 
     def _action_pay(self, journal, payment_date):
+        """Crea y publica el pago y marca la solicitud como pagada, todo en la misma transacción.
+
+        Si la creación o la publicación del pago fallan, la excepción sube y Odoo deshace toda la
+        transacción: ni pago ni estado "pagada". Por eso NO se atrapa la excepción ni se hace commit.
+        """
         self.ensure_one()
+        self._lock_for_update()
         self._check_group("payment_request.group_payment_request_treasury")
         if self.state != "approved" or self.payment_id:
             raise UserError(_("La solicitud %s ya fue pagada o no está aprobada.", self.name))
+
+        journal_currency = journal.currency_id or journal.company_id.currency_id
+        amount = self.amount
+        if journal_currency != self.currency_id:
+            # Tasa de la fecha del PAGO (no de la solicitud): es lo que sale del banco ese día.
+            amount = self.currency_id._convert(self.amount, journal_currency, self.company_id, payment_date)
+
         payment = self.env["account.payment"].create({
             "payment_type": "outbound",
             "partner_type": "supplier",
             "partner_id": self.partner_id.id,
-            "amount": self.amount,
-            "currency_id": self.currency_id.id,
+            "amount": amount,
+            "currency_id": journal_currency.id,
             "journal_id": journal.id,
             "date": payment_date,
             "ref": self.name,
         })
         payment.action_post()
         self.write({"payment_id": payment.id, "state": "paid"})
-        self.message_post(body=_("Pagada con %s.", payment.name))
+        if journal_currency != self.currency_id:
+            self.message_post(body=_(
+                "Pagada con %(payment)s: %(original)s %(from_cur)s = %(paid)s %(to_cur)s a la tasa del %(date)s.",
+                payment=payment.name, original=self.amount, from_cur=self.currency_id.name,
+                paid=amount, to_cur=journal_currency.name, date=payment_date,
+            ))
+        else:
+            self.message_post(body=_("Pagada con %s.", payment.name))
         return payment
 
     def action_reset_to_draft(self):
