@@ -1,6 +1,10 @@
+import logging
+import time
 from psycopg2 import IntegrityError
 from odoo.tests import TransactionCase, tagged
 from odoo.tools import mute_logger
+
+_logger = logging.getLogger(__name__)
 
 @tagged("post_install", "-at_install")
 class TestVehicleTypeMigration(TransactionCase):
@@ -66,3 +70,30 @@ class TestVehicleTypeMigration(TransactionCase):
     def test_type_is_required(self):
         with mute_logger("odoo.sql_db"), self.assertRaises(IntegrityError), self.env.cr.savepoint():
             self.env["fleet.inspection"].create({"vehicle_id": self.vehicle.id, "vehicle_type_id": False})
+
+    def test_migrates_10000_rows_in_batches(self):
+        self._prepare_legacy_schema()
+        self.env.cr.execute(
+            """
+            INSERT INTO fleet_inspection (name, vehicle_id, inspector_id, date, state, vehicle_type)
+            SELECT 'BULK/' || g, %s, %s, CURRENT_DATE, 'draft',
+                   (ARRAY['motorcycle', 'car', 'truck', 'other'])[1 + g %% 4]
+              FROM generate_series(1, 10000) AS g
+            """,
+            [self.vehicle.id, self.env.uid],
+        )
+        started = time.perf_counter()
+        converted = self.env["fleet.inspection"]._migrate_legacy_vehicle_type(batch_size=1000)
+        elapsed = time.perf_counter() - started
+        _logger.info("fleet_inspection: 10000 filas migradas en lotes de 1000 en %.3f s", elapsed)
+
+        self.assertEqual(converted, 10000)
+        self.env.cr.execute("SELECT count(*) FROM fleet_inspection WHERE vehicle_type_id IS NULL")
+        self.assertEqual(self.env.cr.fetchone()[0], 0)
+        self.env.cr.execute(
+            """SELECT count(*) FROM fleet_inspection fi
+                 JOIN fleet_inspection_vehicle_type t ON t.id = fi.vehicle_type_id
+                WHERE fi.name LIKE 'BULK/%%' AND t.code = 'other'"""
+        )
+        self.assertEqual(self.env.cr.fetchone()[0], 2500)
+        self.assertLess(elapsed, 60, "La migración de 10 000 filas no debería tardar un minuto")
