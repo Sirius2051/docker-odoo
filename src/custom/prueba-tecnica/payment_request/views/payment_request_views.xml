@@ -32,7 +32,7 @@
                     <button name="action_reject" string="Rechazar" type="object"
                             invisible="state != 'submitted'"
                             groups="payment_request.group_payment_request_approver"/>
-                    <button name="action_mark_paid" string="Marcar como pagada" type="object" class="oe_highlight"
+                    <button name="action_pay" string="Pagar" type="object" class="oe_highlight"
                             invisible="state != 'approved'"
                             groups="payment_request.group_payment_request_treasury"/>
                     <button name="action_reset_to_draft" string="Volver a borrador" type="object"
@@ -54,13 +54,18 @@
                             <field name="requester_id" readonly="True"/>
                             <field name="date" readonly="state != 'draft'"/>
                             <field name="company_id" groups="base.group_multi_company" readonly="state != 'draft'"/>
+                            <field name="approver_id" invisible="not approver_id"/>
                             <field name="approved_by_id" invisible="not approved_by_id"/>
                             <field name="approved_date" invisible="not approved_date"/>
+                            <field name="payment_id" invisible="not payment_id"/>
                         </group>
                     </group>
                     <group string="Concepto">
                         <field name="concept" nolabel="1" colspan="2" readonly="state != 'draft'"
                                placeholder="¿Qué se paga y por qué?"/>
+                    </group>
+                    <group string="Motivo del rechazo" invisible="not rejection_reason">
+                        <field name="rejection_reason" nolabel="1" colspan="2"/>
                     </group>
                 </sheet>
                 <div class="oe_chatter">
