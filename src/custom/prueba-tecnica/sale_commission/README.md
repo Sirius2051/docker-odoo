@@ -13,7 +13,7 @@ Versión **1.1.1** (corrección del ticket T-200).
 
 - Al confirmar el pedido se fija el porcentaje en cada línea y se calcula la comisión sobre el subtotal sin impuestos.
 - Sin regla de categoría, se usa el porcentaje del **vendedor del pedido** (no el de quien lo confirma).
-- El botón *Recalcular comisiones* del pedido vuelve a aplicar los porcentajes vigentes.
+- El botón *Recalcular comisiones* del pedido vuelve a aplicar los porcentajes vigentes, con la misma regla que la confirmación.
 - Ventas › Reportes › *Comisiones*: tabla dinámica y gráfico por vendedor y mes. Cada vendedor ve solo lo suyo.
 
 ## Permisos
@@ -29,7 +29,7 @@ Versión **1.1.1** (corrección del ticket T-200).
 ./odoo test prueba-tecnica -d prueba_limpia -m sale_commission
 ```
 
-Resultado: **8 pruebas, 0 fallos, 0 errores**. Las pruebas crean y confirman los pedidos **con el
+Resultado: **11 pruebas, 0 fallos, 0 errores**. Las pruebas crean y confirman los pedidos **con el
 usuario vendedor** (`with_user`), no como administrador.
 
 | Prueba | Qué demuestra |
@@ -42,13 +42,18 @@ usuario vendedor** (`with_user`), no como administrador.
 | `test_t200_manager_can_still_confirm` | **T-200:** el gerente sigue confirmando igual |
 | `test_t200_manager_confirming_keeps_salesman_percent` | **T-200:** si el gerente confirma un pedido ajeno, se usa el porcentaje del vendedor |
 | `test_t200_salesman_cannot_edit_rules` | **T-200:** el vendedor **no** puede modificar las reglas (no se repartieron permisos de más) |
+| `test_t200_mismatches_lists_only_wrong_lines` | **T-200, tramo C:** la detección lista solo las líneas con el porcentaje equivocado |
+| `test_t200_mismatches_ignores_older_orders` | **T-200, tramo C:** la detección ignora los pedidos anteriores a la fecha |
+| `test_recompute_uses_same_rule_as_confirm` | El recálculo usa la misma regla que la confirmación (incluida la categoría padre) |
 
 ## Prueba técnica — ejercicio 3 (ticket T-200)
 
-- **Tramos completados:** A y B. Todo el detalle (reproducción, causa raíz, corrección, prueba
-  antes y después, contención, commit culpable, despliegue y mensaje al cliente) está en
-  [INCIDENT.md](INCIDENT.md).
-- **Rama y pull request:** `hotfix/T-200`, PR: <enlace>.
+- **Tramos completados:** A, B y C. Todo el detalle (reproducción, causa raíz, corrección, prueba
+  antes y después, contención, commit culpable, despliegue, mensaje al cliente, impacto en los
+  datos, plan de corrección y prevención) está en [INCIDENT.md](INCIDENT.md).
+- **Ramas:** `hotfix/T-200` (tramos A y B, PR [#1](https://github.com/Sirius2051/docker-odoo/pull/1), fusionado) y `fix/T-200-datos` (tramo C).
+- **Script de solo lectura:** `scripts/t200_affected_lines.py` lista las líneas con la comisión
+  mal asignada (CSV) sin modificar nada.
 - **Resumen:** desde la versión 1.1.0, confirmar un pedido lee `sale.commission.rule`, y el
   vendedor no tenía permiso de lectura sobre ese modelo. Se agregó un permiso de **solo lectura**
   para el grupo de vendedores y se corrigió que, sin regla de categoría, se usaba el porcentaje de
@@ -63,10 +68,11 @@ usuario vendedor** (`with_user`), no como administrador.
 
 ### Limitaciones conocidas
 
-- Las comisiones de los pedidos que el gerente confirmó esta tarde siguen sin corregir (tramo C,
-  no realizado en esta entrega).
-- `action_recompute_commissions` repite la lógica de cálculo con otra regla (categoría exacta, sin
-  categorías padre ni compañía). Se reporta, pero no se corrige en este hotfix, para mantener el
-  cambio mínimo.
-- El botón *Recalcular comisiones* no tiene restricción de grupo. Queda como pregunta para el
-  cliente: ¿debería usarlo solo el gerente?
+- Las comisiones mal asignadas en producción **no se corrigen automáticamente**: el script las
+  lista y el plan de corrección (en INCIDENT.md) requiere la revisión del cliente antes de tocarlas.
+- El script compara con las reglas vigentes al ejecutarse: si una regla cambió después del
+  incidente, conviene revisar el listado.
+- El botón *Recalcular comisiones* sigue sin restricción de grupo, a la espera de la respuesta del
+  cliente.
+- Al instalar, Odoo muestra avisos de `docutils`: interpreta este README en Markdown como
+  reStructuredText para la descripción del módulo. No afecta al funcionamiento.

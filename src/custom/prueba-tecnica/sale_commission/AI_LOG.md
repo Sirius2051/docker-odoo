@@ -29,7 +29,6 @@
   AccessError`). No hay: Odoo registra los errores de permisos como una advertencia de una línea,
   sin *traceback*. El *traceback* con la línea exacta (`sale_order_line.py`, línea 28) lo obtuve
   de la ejecución de las pruebas antes de corregir.
-- <agrega aquí cualquier otra cosa que hayas tenido que corregir>
 
 ## Lo que escribiste tú sin IA
 
